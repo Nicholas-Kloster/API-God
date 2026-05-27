@@ -18,7 +18,16 @@ if (cmd === 'query') {
     limit: limitFlag ? parseInt(limitFlag, 10) : 200,
   });
 
-  for (const row of rows) process.stdout.write(JSON.stringify(row) + '\n');
+  const pretty = process.argv.includes('--pretty') || process.argv.includes('-p');
+  for (const row of rows) {
+    if (pretty) {
+      let parsed = {};
+      try { parsed = JSON.parse(row.data ?? '{}'); } catch {}
+      process.stdout.write(JSON.stringify({ ...parsed, _id: row.id, _ts: row.ts, _type: row.type, _url: row.url }, null, 2) + '\n');
+    } else {
+      process.stdout.write(JSON.stringify(row) + '\n');
+    }
+  }
   process.exit(0);
 }
 

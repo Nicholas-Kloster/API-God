@@ -39,7 +39,7 @@ function parseHtmlResults(body, query) {
       tags:        tags.join(',') || null,
       last_update: timestamp,
       banner,
-      data:        JSON.stringify({ ip, org, country, city, tags, timestamp, banner }),
+      data:        JSON.stringify({ query, ip, org, country, city, tags, timestamp, banner }),
     });
   }
 
