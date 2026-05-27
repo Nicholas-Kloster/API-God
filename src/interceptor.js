@@ -1,5 +1,5 @@
-import { save }                       from './storage.js';
-import { runOnResponse, runOnWebSocket } from './plugins.js';
+import { save }                                      from './storage.js';
+import { runOnResponse, runOnWebSocket, runOnPageLoad } from './plugins.js';
 
 // Injected into every page at load — proxies window.WebSocket so we
 // can observe frames through window.__apigod__ before CDP sees them.
@@ -102,6 +102,13 @@ async function wireWsBinding(page) {
 }
 
 function attachRoutes(page) {
+  page.on('load', async () => {
+    const url = page.url();
+    if (!url || url === 'about:blank') return;
+    const records = await runOnPageLoad(url, page).catch(() => null);
+    if (records) for (const rec of records) save(rec);
+  });
+
   // Intercept all HTTP/S requests + responses
   page.on('request', (req) => {
     const url = req.url();

@@ -37,3 +37,17 @@ export async function runOnWebSocket(frame) {
   }
   return null;
 }
+
+// Called after a page finishes loading — plugins can inject fetch() calls via page.evaluate().
+// Returns records to save, or null.
+export async function runOnPageLoad(url, page) {
+  for (const plugin of plugins) {
+    if (!plugin.match(url)) continue;
+    if (!plugin.onPageLoad) continue;
+    try {
+      const result = await plugin.onPageLoad(url, page);
+      if (result) return result;
+    } catch {}
+  }
+  return null;
+}
