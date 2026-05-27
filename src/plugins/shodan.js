@@ -1,72 +1,67 @@
-// Shodan plugin — rides the authenticated browser session to pull structured JSON results.
-// No API key file needed. Key is extracted from the logged-in page context and cached.
-// onPageLoad fires on every shodan.io navigation; for search pages it fetches JSON results.
+// Shodan plugin — parses search result HTML from the authenticated browser session.
+// No API key needed. Rides the session, extracts structured host records from the page.
 
-let cachedKey = null;
+function parseHtmlResults(body, query) {
+  const records = [];
 
-function domainOf(url) {
-  try { return new URL(url).hostname.replace(/^www\./, ''); }
-  catch { return 'unknown'; }
-}
+  // Pull each result block
+  const blocks = body.split('class="result"').slice(1);
+  for (const block of blocks) {
+    const end = block.indexOf('class="result"');
+    const chunk = end > 0 ? block.slice(0, end) : block;
 
-// Extract the API key Shodan embeds in the authenticated page JS context.
-async function extractKey(page) {
-  if (cachedKey) return cachedKey;
-  try {
-    const result = await page.evaluate(async () => {
-      // Method 1: try the account profile endpoint (session-authenticated)
-      try {
-        const r = await fetch('/account/info', { credentials: 'include' });
-        if (r.ok) {
-          const j = await r.json();
-          if (j.api_key || j.apiKey) return j.api_key ?? j.apiKey;
-        }
-      } catch {}
+    const ip        = chunk.match(/href="\/host\/([\d.]+)"/)?.[1]              ?? null;
+    if (!ip) continue;
 
-      // Method 2: check common window globals Shodan injects
-      if (window.SHODAN_API_KEY) return window.SHODAN_API_KEY;
-      if (window.apiKey)         return window.apiKey;
+    const org       = chunk.match(/class="filter-link filter-org">([^<]+)</)?.[1]?.trim()  ?? null;
+    const timestamp = chunk.match(/class="timestamp[^"]*">([^<]+)</)?.[1]?.trim()          ?? null;
 
-      // Method 3: scan meta tags
-      const meta = document.querySelector('meta[name="api-key"], meta[name="shodan-key"]');
-      if (meta) return meta.getAttribute('content');
+    // Country + city: two adjacent filter-link text-dark anchors
+    const geo       = [...chunk.matchAll(/class="filter-link text-dark">([^<]+)</g)];
+    const country   = geo[0]?.[1]?.trim() ?? null;
+    const city      = geo[1]?.[1]?.trim() ?? null;
 
-      return null;
+    const tags      = [...chunk.matchAll(/class="tag">([^<]+)</g)].map(m => m[1].trim());
+
+    // Banner preview — content of the <pre> tag
+    const banner    = chunk.match(/<pre>([\s\S]{0,300})<\/pre>/)?.[1]
+                        ?.replace(/<[^>]+>/g, '').trim() ?? null;
+
+    records.push({
+      domain:      'shodan.io',
+      type:        'shodan-host',
+      url:         `https://www.shodan.io/host/${ip}`,
+      query,
+      ip,
+      org,
+      country,
+      city,
+      tags:        tags.join(',') || null,
+      last_update: timestamp,
+      banner,
+      data:        JSON.stringify({ ip, org, country, city, tags, timestamp, banner }),
     });
-    if (result) {
-      cachedKey = result;
-      console.log(`[shodan] key extracted (${result.slice(0,8)}…)`);
-    }
-  } catch {}
-  return cachedKey;
+  }
+
+  return records;
 }
 
-function parseQuery(url) {
-  try {
-    const u = new URL(url);
-    return u.searchParams.get('query') ?? u.searchParams.get('q');
-  } catch { return null; }
+function parseTotalResults(body) {
+  const m = body.match(/class="total-results">([\d,]+)</);
+  return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
 }
 
-function mapHost(host, query) {
-  return {
-    domain:      'shodan.io',
-    type:        'shodan-host',
-    url:         `https://www.shodan.io/host/${host.ip_str}`,
-    query,
-    ip:          host.ip_str,
-    org:         host.org          ?? null,
-    isp:         host.isp          ?? null,
-    asn:         host.asn          ?? null,
-    country:     host.location?.country_name ?? null,
-    city:        host.location?.city         ?? null,
-    hostnames:   host.hostnames?.join(',')   ?? null,
-    ports:       host.ports?.join(',')       ?? null,
-    vulns:       host.vulns ? Object.keys(host.vulns).join(',') : null,
-    tags:        host.tags?.join(',')        ?? null,
-    last_update: host.last_update            ?? null,
-    data:        JSON.stringify(host),
-  };
+function parseFacets(body) {
+  const facets = {};
+  const sections = body.split('<h6>').slice(1);
+  for (const s of sections) {
+    const label = s.match(/^([^<]+)</)?.[1]?.trim();
+    if (!label) continue;
+    const items = [...s.matchAll(/class="filter-link[^"]*">([^<]+)<\/a><span>([\d,]+)<\/span>/g)]
+      .map(m => ({ value: m[1].trim(), count: parseInt(m[2].replace(/,/g, ''), 10) }));
+    if (items.length) facets[label] = items;
+  }
+  return facets;
 }
 
 export default {
@@ -74,50 +69,53 @@ export default {
 
   match: (url) => /shodan\.io/i.test(url),
 
-  // Passive: capture any JSON Shodan API responses that flow through naturally
   async onResponse(url, body) {
-    if (!url.includes('api.shodan.io') && !url.includes('/shodan/')) return null;
-    let parsed;
-    try { parsed = JSON.parse(body); } catch { return null; }
+    // HTML search results page
+    if (/shodan\.io\/search\?/.test(url) && body.includes('class="result"')) {
+      let query = 'unknown';
+      try { query = decodeURIComponent(new URL(url).searchParams.get('query') ?? 'unknown'); } catch {}
 
-    const hosts = Array.isArray(parsed?.matches) ? parsed.matches : null;
-    if (!hosts) return null;
+      const hosts   = parseHtmlResults(body, query);
+      const total   = parseTotalResults(body);
+      const facets  = parseFacets(body);
 
-    const query = parseQuery(url) ?? 'unknown';
-    return hosts.map(h => mapHost(h, query));
-  },
-
-  // Active: when a search page loads, fetch JSON results via the authenticated session
-  async onPageLoad(url, page) {
-    if (!/shodan\.io\/(search|host\/search)/i.test(url)) return null;
-
-    const query = parseQuery(url);
-    if (!query) return null;
-
-    const key = await extractKey(page);
-    if (!key) {
-      console.log('[shodan] no key available — passive capture only');
-      return null;
+      if (hosts.length > 0) {
+        console.log(`[shodan] query="${query}" → ${hosts.length} hosts on page (total: ${total ?? '?'})`);
+        if (Object.keys(facets).length) {
+          for (const [label, items] of Object.entries(facets)) {
+            console.log(`  ${label}: ${items.slice(0,3).map(i => `${i.value} (${i.count})`).join(', ')}`);
+          }
+        }
+        return hosts;
+      }
     }
 
-    const page_num = (() => {
-      try { return parseInt(new URL(url).searchParams.get('page') ?? '1', 10); } catch { return 1; }
-    })();
+    // Passive: JSON API responses if they flow through naturally (rare without key)
+    if (/api\.shodan\.io/.test(url)) {
+      let parsed;
+      try { parsed = JSON.parse(body); } catch { return null; }
+      const matches = parsed?.matches;
+      if (!Array.isArray(matches)) return null;
+      let q = 'unknown';
+      try { q = decodeURIComponent(new URL(url).searchParams.get('query') ?? 'unknown'); } catch {}
+      return matches.map(h => ({
+        domain:      'shodan.io',
+        type:        'shodan-host',
+        url:         `https://www.shodan.io/host/${h.ip_str}`,
+        query:       q,
+        ip:          h.ip_str,
+        org:         h.org    ?? null,
+        country:     h.location?.country_name ?? null,
+        city:        h.location?.city         ?? null,
+        hostnames:   h.hostnames?.join(',')   ?? null,
+        ports:       h.ports?.join(',')        ?? null,
+        vulns:       h.vulns ? Object.keys(h.vulns).join(',') : null,
+        tags:        h.tags?.join(',')         ?? null,
+        last_update: h.last_update             ?? null,
+        data:        JSON.stringify(h),
+      }));
+    }
 
-    const apiUrl = `https://api.shodan.io/shodan/host/search?key=${key}&query=${encodeURIComponent(query)}&page=${page_num}`;
-
-    let result;
-    try {
-      result = await page.evaluate(async (fetchUrl) => {
-        const r = await fetch(fetchUrl, { credentials: 'omit' });
-        if (!r.ok) return null;
-        return r.json();
-      }, apiUrl);
-    } catch { return null; }
-
-    if (!result?.matches?.length) return null;
-
-    console.log(`[shodan] query="${query}" page=${page_num} → ${result.matches.length} hosts (total: ${result.total})`);
-    return result.matches.map(h => mapHost(h, query));
+    return null;
   },
 };
