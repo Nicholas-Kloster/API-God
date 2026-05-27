@@ -1,5 +1,6 @@
-import { launch }  from './browser.js';
-import { attach }  from './interceptor.js';
+import { launch }       from './browser.js';
+import { attach }       from './interceptor.js';
+import { loadPlugins }  from './plugins.js';
 import { stats, query } from './storage.js';
 
 const cmd = process.argv[2];
@@ -29,6 +30,7 @@ if (cmd === 'stats') {
 }
 
 // ── api-god start (default) ──
+await loadPlugins();
 console.log('[api-god] launching browser…');
 
 const { context, page } = await launch();

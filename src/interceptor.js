@@ -1,4 +1,5 @@
-import { save } from './storage.js';
+import { save }          from './storage.js';
+import { runOnResponse } from './plugins.js';
 
 // Injected into every page at load — proxies window.WebSocket so we
 // can observe frames through window.__apigod__ before CDP sees them.
@@ -121,6 +122,16 @@ function attachRoutes(page) {
         body = await res.text().catch(() => null);
       }
     } catch {}
+
+    // Give plugins first crack — if one matches, save their structured records
+    // instead of (not in addition to) the raw response.
+    if (body) {
+      const pluginRecords = await runOnResponse(url, body);
+      if (pluginRecords) {
+        for (const rec of pluginRecords) save(rec);
+        return;
+      }
+    }
 
     save({
       domain: domainOf(url),

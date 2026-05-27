@@ -1,0 +1,27 @@
+import { readdirSync } from 'fs';
+import { join }        from 'path';
+import { fileURLToPath } from 'url';
+
+const PLUGIN_DIR = join(fileURLToPath(import.meta.url), '../plugins');
+
+const plugins = [];
+
+export async function loadPlugins() {
+  const files = readdirSync(PLUGIN_DIR).filter(f => f.endsWith('.js') && !f.startsWith('_'));
+  for (const file of files) {
+    const mod = await import(join(PLUGIN_DIR, file));
+    plugins.push(mod.default);
+    console.log(`[api-god] plugin loaded: ${mod.default.name}`);
+  }
+}
+
+// Returns plugin-transformed records if a plugin matches, otherwise null.
+export async function runOnResponse(url, body) {
+  for (const plugin of plugins) {
+    if (!plugin.match(url)) continue;
+    if (!plugin.onResponse) continue;
+    const result = await plugin.onResponse(url, body);
+    if (result) return result;
+  }
+  return null;
+}
