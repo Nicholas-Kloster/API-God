@@ -1,5 +1,5 @@
-import { save }          from './storage.js';
-import { runOnResponse } from './plugins.js';
+import { save }                       from './storage.js';
+import { runOnResponse, runOnWebSocket } from './plugins.js';
 
 // Injected into every page at load — proxies window.WebSocket so we
 // can observe frames through window.__apigod__ before CDP sees them.
@@ -65,7 +65,12 @@ export async function attach(context, page) {
   await context.addInitScript(WS_PROXY_SCRIPT);
 
   // Expose a binding so page JS can send WS frames to Node
-  await context.exposeFunction('__apigod_ws__', (ev) => {
+  await context.exposeFunction('__apigod_ws__', async (ev) => {
+    const pluginRecords = await runOnWebSocket(ev);
+    if (pluginRecords) {
+      for (const rec of pluginRecords) save(rec);
+      return;
+    }
     save({
       domain: domainOf(ev.url),
       type:   `ws-${ev.dir}`,

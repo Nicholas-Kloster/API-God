@@ -25,3 +25,15 @@ export async function runOnResponse(url, body) {
   }
   return null;
 }
+
+// Returns plugin-transformed records for a WS frame, or null to fall through to raw save.
+export async function runOnWebSocket(frame) {
+  for (const plugin of plugins) {
+    const matchFn = plugin.matchWS ?? plugin.match;
+    if (!matchFn(frame.url)) continue;
+    if (!plugin.onWebSocket) continue;
+    const result = await plugin.onWebSocket(frame);
+    if (result) return result;
+  }
+  return null;
+}
