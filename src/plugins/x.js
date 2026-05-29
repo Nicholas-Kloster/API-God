@@ -1,5 +1,5 @@
 // X.com — intercepts SearchTimeline GraphQL responses and extracts structured tweets.
-// Ported from github.com/Nicholas-Kloster/api-god-x (api-god-x.py)
+// Ported from github.com/nuclide-research/api-god-x (api-god-x.py)
 
 export default {
   name: 'x',
