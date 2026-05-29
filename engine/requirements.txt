@@ -1,2 +1,5 @@
 requests
 websockets
+scikit-learn
+numpy
+# after pip install: playwright install chromium (only for the search tool)

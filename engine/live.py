@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import websockets, requests
 from engine_core import norm_name, cashtag_hit, classify, zone_of, score_resolved, fetch_meta, independent_bonus
 from discovery import discover_independent
+from outcomes import record
 
 BUDGET = 540; DEDUP_S = 300
 RAW = "/tmp/mints2.jsonl"; SUMMARY = "/tmp/run2_summary.txt"
@@ -91,6 +92,12 @@ def process(ev, zone):
 
 def _emit(rec):
     with lock: survivors.append(rec)
+    try:                                              # log the scored coin for the outcome loop (non-fatal)
+        record({"mint": rec.get("mint"), "creator": rec.get("creator"), "score": rec.get("score"),
+                "features": {"zone": rec.get("zone"), "verified": rec.get("verified"),
+                             "independent": rec.get("independent"), "serial": rec.get("serial")}})
+    except Exception:
+        pass
 
 async def stream_once(ws, ex, deadline):
     await ws.send(json.dumps({"method": "subscribeNewToken"}))
