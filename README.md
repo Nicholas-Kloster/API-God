@@ -74,6 +74,27 @@ minute, each with an X link attached. The free path worked end to end, find the 
 the public endpoint, all for free. Then the obvious part, the same find-and-read works for anything: a
 person, a company, an event, not just coins. That is the tool.
 
+## How it compares
+
+The two doors are not secret. Other tools use them. `twscrape` and `twikit` drive a logged-in account
+against X's internal endpoints, the same primitive as the `session` backend. The
+`cdn.syndication.twimg.com` read trick has been written up for years and runs in deployed services like
+`xreader`. The primitives are known. What is built on them here is the part that is not.
+
+- **Two backends, one tool.** The other scrapers pick one path and live on it. This one runs a
+  logged-in path and a no-login paid path as named, swappable backends.
+- **`both` merges them.** Run `session` and `xai` together and combine the results. One sourcing path
+  misses what the other catches. Merging widens the net in a single search.
+- **`xai` needs no X account.** The logged-in scrapers all carry account-ban risk. They all run on a
+  logged-in account. The `xai` backend sources post links through xAI's search service with no X login,
+  so there is no account to lose.
+- **Topic first, not object first.** Most tools archive a known handle or a known tweet. This one starts
+  from a topic and finds who is posting about it.
+
+One known limit comes with the read door. `cdn.syndication.twimg.com` returns HTTP 200 with an empty
+body when it fails. Cloud IPs see frequent blanks and 404s. Running from a logged-in user's own machine
+stays close to the case that works. Heavy cloud-side use does not.
+
 ## One example of what you can build on it: a Solana coin tracker
 
 `engine/` is a prototype that points the same idea at one specific use. It watches new Solana coins the
