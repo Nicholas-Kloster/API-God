@@ -24,9 +24,14 @@ python xsearch.py "a person or company"
 
 Three ways to run it:
 
-- **session**: free. Uses your own X login.
-- **xai**: about half a cent per search. No login, no account risk (needs an xAI key).
-- **both**: runs the two together and merges the results.
+| Backend | Cost | Needs | Account risk |
+|---------|------|-------|--------------|
+| `session` | Free | Your own X login | Yes. Drives your logged-in account, so heavy use can get it rate-limited or suspended. |
+| `xai` | ~$0.005 per search | An xAI key | None. No X login, nothing tied to your account. |
+| `both` | Sum of the two | Both of the above | Same as `session`, since it runs that path too. |
+
+Pick `session` to pay nothing and accept the account risk. Pick `xai` to pay half a cent and carry no
+risk. Pick `both` when you want the widest result set and have already accepted the `session` risk.
 
 Full guide: `search/README.md`.
 
@@ -51,6 +56,14 @@ thousands of dollars a month at the volume you would actually need.
 You do not need it. X already hands the same data out for free in two places. Its own web app reads
 posts through endpoints that work as long as you are logged in, no key. And every tweet embedded on any
 website is served by a public endpoint that needs no login at all. Both were sitting in plain sight.
+
+### Why those endpoints stay open
+
+X gates this data behind the paid API, but it cannot close the two free doors without breaking its own
+product. The logged-in web endpoints are what x.com itself runs on. Kill them and the website dies. The
+syndication endpoint at `cdn.syndication.twimg.com` renders embedded tweets on every news site, blog,
+and forum. Kill it and tweet embeds break everywhere. The data leaks through the parts of X that have to
+stay public. The tool reads the same doors the browser already uses.
 
 We tested the idea on the noisiest thing we could find: the flood of new Solana coins minting every
 minute, each with an X link attached. The free path worked end to end, find the posts, read them through
