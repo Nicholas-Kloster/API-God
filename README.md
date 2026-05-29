@@ -30,6 +30,33 @@ Three ways to run it:
 
 Full guide: `search/README.md`.
 
+## How it works
+
+Two free pieces, glued together.
+
+1. **Finding posts.** To find who is posting about something, the tool either drives X's own search
+   through your logged-in session (the `session` backend) or asks xAI's search service (the `xai`
+   backend). Either way it ends up with a set of post links.
+2. **Reading posts.** Each post is read through `cdn.syndication.twimg.com`, the public endpoint that
+   powers embedded tweets across the web. It returns a post's text, author, and engagement as clean
+   JSON, with no login and no key. That is the part that makes it free.
+
+Find the posts, then read each one through the free public endpoint. No paid X API anywhere in the loop.
+
+## Where the idea came from
+
+The data you want, who is saying what on X, sits behind X's official API. That API costs tens of
+thousands of dollars a month at the volume you would actually need.
+
+You do not need it. X already hands the same data out for free in two places. Its own web app reads
+posts through endpoints that work as long as you are logged in, no key. And every tweet embedded on any
+website is served by a public endpoint that needs no login at all. Both were sitting in plain sight.
+
+We tested the idea on the noisiest thing we could find: the flood of new Solana coins minting every
+minute, each with an X link attached. The free path worked end to end, find the posts, read them through
+the public endpoint, all for free. Then the obvious part, the same find-and-read works for anything: a
+person, a company, an event, not just coins. That is the tool.
+
 ## One example of what you can build on it: a Solana coin tracker
 
 `engine/` is a prototype that points the same idea at one specific use. It watches new Solana coins the
