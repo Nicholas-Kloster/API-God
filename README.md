@@ -37,6 +37,22 @@ Three ways to run it:
 Pick `session` to pay nothing and accept the account risk. Pick `xai` to pay half a cent and carry no
 risk. Pick `both` when you want the widest result set and have already accepted the `session` risk.
 
+### session vs xai: two different keys, neither is X's paid API
+
+Neither backend uses X's official paid API. That is the whole point. The two paths get the same data a
+different way.
+
+- **`session` uses no key at all.** It uses your own X login cookies and drives x.com's web search like
+  a logged-in person, automated. That automation is what breaks X's terms, and that is why the account
+  can get suspended. Free, risky.
+- **`xai` uses an xAI key, not an X key.** xAI is a separate company. The key is for Grok's search
+  service, not for X's data API. There is no X login behind it, so there is no X account to suspend.
+  Cheap, safe.
+
+So the free path is cookie automation and carries ban risk. The paid path runs through a different
+vendor and carries none. The official X API, the one that does not get you banned, is the
+tens-of-thousands-a-month bill this tool exists to skip.
+
 Full guide: `search/README.md`.
 
 ## How it works
