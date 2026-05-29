@@ -1,5 +1,11 @@
 # API-God
 
+API-God is a free X (Twitter) intelligence tool. 
+Core function: give it any search term (topic, person, company, ticker, hashtag, event) and it returns a structured list of who on 
+X is posting about it, what they said, and engagement numbers, sortable and saveable.
+
+The point is doing this without X's paid API, which runs tens of thousands a month for this access tier.
+  
 Find who's talking about anything on X (Twitter), for free. No API key. No $30,000-a-month data bill.
 
 ## What it does
