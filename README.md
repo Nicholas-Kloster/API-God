@@ -30,6 +30,10 @@ Three ways to run it:
 | `xai` | ~$0.005 per search | An xAI key | None. No X login, nothing tied to your account. |
 | `both` | Sum of the two | Both of the above | Same as `session`, since it runs that path too. |
 
+> **Warning: the `session` and `both` backends can get your X account suspended.** They drive your own
+> logged-in account through X's web search. Heavy or fast use looks like automation and X can
+> rate-limit or ban the account. The `xai` backend carries no such risk: it uses no X login.
+
 Pick `session` to pay nothing and accept the account risk. Pick `xai` to pay half a cent and carry no
 risk. Pick `both` when you want the widest result set and have already accepted the `session` risk.
 
