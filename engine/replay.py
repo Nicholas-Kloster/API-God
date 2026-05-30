@@ -1,5 +1,6 @@
 """Replay engine over captured mints (no PumpPortal connection). Uses shared engine_core logic.
-Tests SPC zoning + serial detection + scoring on the real dataset; enrich/resolve hit IPFS + syndication only."""
+Tests SPC zoning + serial detection + scoring on the real dataset; enrich/resolve hit IPFS + syndication only.
+Importable: call run(src) from tests; running as a script replays argv[1]."""
 import json, sys, threading
 from collections import deque, defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -7,7 +8,6 @@ import requests
 from engine_core import norm_name, cashtag_hit, classify, zone_of, score_resolved, fetch_meta, independent_bonus, dedup_name
 from discovery import discover_independent
 
-SRC = sys.argv[1] if len(sys.argv) > 1 else "/tmp/mints.jsonl"
 ROLL = 200; DEDUP_IDX_FALLBACK = 50   # index-window dedup only for old captures that predate _ts
 GATEWAYS = ["https://pump.mypinata.cloud/ipfs/", "https://ipfs.io/ipfs/", "https://cloudflare-ipfs.com/ipfs/"]
 
@@ -78,48 +78,58 @@ def process(ev, zone):
 def _emit(rec):
     with lock: survivors.append(rec)
 
-events = [json.loads(l) for l in open(SRC) if l.strip()]
-has_ts = bool(events) and "_ts" in events[0]      # live stamps _ts; captures predating that lack it
-if not has_ts:
-    print("note: capture has no _ts (pre-reconcile); index-window dedup, not identical to a live run")
-print(f"replaying {len(events)} mints (engine_core logic) ...")
-ex = ThreadPoolExecutor(max_workers=8)
-for i, ev in enumerate(events):
-    buy = ev.get("solAmount") or 0; nm = norm_name(ev.get("name"))
-    by_creator[ev.get("traderPublicKey")].append(ev.get("mint"))
-    devbuf.append(buy)
-    dup = dedup_name(nm, ev["_ts"], last_name) if has_ts else dedup_name(nm, i, last_name, window=DEDUP_IDX_FALLBACK)
-    if dup:
-        gaps["dedup_name"] += 1; continue
-    z = zone_of(buy, list(devbuf)); zone_count[z] += 1
-    if z == "green": gaps["suppressed_green"] += 1; continue
-    ex.submit(process, ev, z)
-ex.shutdown(wait=True)
+def _reset():
+    """Clear per-run module state so run() can be called repeatedly (tests)."""
+    devbuf.clear(); survivors.clear(); gaps.clear(); zone_count.clear()
+    by_status.clear(); by_creator.clear(); by_author.clear(); last_name.clear()
 
-# cluster re-score post-pass (both wallet + author; penalizes every member)
-wsize = {c: len(m) for c, m in by_creator.items()}; asize = {a: len(m) for a, m in by_author.items() if a}
-for s in survivors:
-    wc = wsize.get(s["creator"], 1); ac = asize.get(s.get("author"), 1)
-    if wc > 1 or ac > 1:
-        s["score"] -= 2; tags = []
-        if wc > 1: tags.append(f"wallet x{wc}")
-        if ac > 1: tags.append(f"author x{ac}")
-        if wc > 1 and ac > 1: s["score"] -= 1; tags.append("BOTH")
-        s["notes"].append("+".join(tags)); s["serial"] = max(wc, ac)
+def run(src):
+    _reset()
+    events = [json.loads(l) for l in open(src) if l.strip()]
+    has_ts = bool(events) and "_ts" in events[0]      # live stamps _ts; captures predating that lack it
+    if not has_ts:
+        print("note: capture has no _ts (pre-reconcile); index-window dedup, not identical to a live run")
+    print(f"replaying {len(events)} mints (engine_core logic) ...")
+    ex = ThreadPoolExecutor(max_workers=8)
+    for i, ev in enumerate(events):
+        buy = ev.get("solAmount") or 0; nm = norm_name(ev.get("name"))
+        by_creator[ev.get("traderPublicKey")].append(ev.get("mint"))
+        devbuf.append(buy)
+        dup = dedup_name(nm, ev["_ts"], last_name) if has_ts else dedup_name(nm, i, last_name, window=DEDUP_IDX_FALLBACK)
+        if dup:
+            gaps["dedup_name"] += 1; continue
+        z = zone_of(buy, list(devbuf)); zone_count[z] += 1
+        if z == "green": gaps["suppressed_green"] += 1; continue
+        ex.submit(process, ev, z)
+    ex.shutdown(wait=True)
 
-n = len(events); buf = sorted(devbuf); p80 = buf[int(.8*len(buf))]; p95 = buf[int(.95*len(buf))]
-print("\n" + "=" * 66)
-print(f"REPLAY (core)  |  {n} mints  |  SPC p80={p80:.2f} p95={p95:.2f} SOL")
-print(f"zones: green {zone_count['green']} | amber {zone_count['amber']} | red {zone_count['red']} | dedup {gaps['dedup_name']}")
-print("stage outcomes:", {k: v for k, v in sorted(gaps.items()) if k not in ('suppressed_green', 'dedup_name')})
-verified = [s for s in survivors if s.get("verified")]
-imp = [s for s in survivors if any('omits' in x or 'void-verify' in x for x in s.get("notes", []))]
-clustered = [s for s in survivors if s.get("serial")]
-print(f"verified: {len(verified)} | impersonation/spoof: {len(imp)} | cluster-penalized: {len(clustered)}")
-print("\ntop survivors:")
-for s in sorted(survivors, key=lambda s: s.get("score", 0), reverse=True)[:10]:
-    print(f"  [{s.get('score'):+d}] {s['zone']:5} {s['name'][:20]:20} @{s.get('author')} buy={round(s.get('dev_buy'),2)} "
-          f"ver={s.get('verified')} {';'.join(s['notes'])[:40]}")
-print("\nbottom survivors:")
-for s in sorted(survivors, key=lambda s: s.get("score", 0))[:6]:
-    print(f"  [{s.get('score'):+d}] {s['zone']:5} {s['name'][:20]:20} {';'.join(s['notes'])[:52]}")
+    # cluster re-score post-pass (both wallet + author; penalizes every member)
+    wsize = {c: len(m) for c, m in by_creator.items()}; asize = {a: len(m) for a, m in by_author.items() if a}
+    for s in survivors:
+        wc = wsize.get(s["creator"], 1); ac = asize.get(s.get("author"), 1)
+        if wc > 1 or ac > 1:
+            s["score"] -= 2; tags = []
+            if wc > 1: tags.append(f"wallet x{wc}")
+            if ac > 1: tags.append(f"author x{ac}")
+            if wc > 1 and ac > 1: s["score"] -= 1; tags.append("BOTH")
+            s["notes"].append("+".join(tags)); s["serial"] = max(wc, ac)
+
+    n = len(events); buf = sorted(devbuf); p80 = buf[int(.8*len(buf))]; p95 = buf[int(.95*len(buf))]
+    print("\n" + "=" * 66)
+    print(f"REPLAY (core)  |  {n} mints  |  SPC p80={p80:.2f} p95={p95:.2f} SOL")
+    print(f"zones: green {zone_count['green']} | amber {zone_count['amber']} | red {zone_count['red']} | dedup {gaps['dedup_name']}")
+    print("stage outcomes:", {k: v for k, v in sorted(gaps.items()) if k not in ('suppressed_green', 'dedup_name')})
+    verified = [s for s in survivors if s.get("verified")]
+    imp = [s for s in survivors if any('omits' in x or 'void-verify' in x for x in s.get("notes", []))]
+    clustered = [s for s in survivors if s.get("serial")]
+    print(f"verified: {len(verified)} | impersonation/spoof: {len(imp)} | cluster-penalized: {len(clustered)}")
+    print("\ntop survivors:")
+    for s in sorted(survivors, key=lambda s: s.get("score", 0), reverse=True)[:10]:
+        print(f"  [{s.get('score'):+d}] {s['zone']:5} {s['name'][:20]:20} @{s.get('author')} buy={round(s.get('dev_buy'),2)} "
+              f"ver={s.get('verified')} {';'.join(s['notes'])[:40]}")
+    print("\nbottom survivors:")
+    for s in sorted(survivors, key=lambda s: s.get("score", 0))[:6]:
+        print(f"  [{s.get('score'):+d}] {s['zone']:5} {s['name'][:20]:20} {';'.join(s['notes'])[:52]}")
+
+if __name__ == "__main__":
+    run(sys.argv[1] if len(sys.argv) > 1 else "/tmp/mints.jsonl")

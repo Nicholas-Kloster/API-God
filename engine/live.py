@@ -172,4 +172,5 @@ def summarize():
         out.append(f"  [{s.get('score'):+d}] {s['zone']:5} {s['name'][:20]:20} @{s.get('author')} buy={round(s.get('dev_buy'),2)} ver={s.get('verified')}")
     txt = "\n".join(out); print("\n" + txt); open(SUMMARY, "w").write(txt)
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
