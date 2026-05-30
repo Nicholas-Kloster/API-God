@@ -21,6 +21,7 @@ RPC = os.environ.get("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 DB  = os.environ.get("OUTCOMES_DB", os.path.join(os.path.dirname(__file__), "outcomes.db"))
 CHECK_AFTER_H  = 6          # first outcome check at T+6h
 DEAD_SILENCE_H = 6          # no on-chain activity in this many hours = abandoned
+GRADUATED_DEXES = {"raydium", "raydium-clmm", "orca", "meteora", "jupiter", "fluxbeam"}  # real DEXes off the curve (#9)
 
 def _db():
     c = sqlite3.connect(DB)
@@ -36,16 +37,19 @@ def _db():
 def record(coin):
     """Called by the engine when it scores a coin. coin = {mint, creator, score, features dict}."""
     c = _db()
-    c.execute("INSERT OR IGNORE INTO scored(mint,creator,score,features,scored_at) VALUES(?,?,?,?,?)",
-              (coin.get("mint"), coin.get("creator"), coin.get("score"),
-               json.dumps(coin.get("features", {})), time.time()))
-    c.commit(); c.close()
+    try:
+        c.execute("INSERT OR IGNORE INTO scored(mint,creator,score,features,scored_at) VALUES(?,?,?,?,?)",
+                  (coin.get("mint"), coin.get("creator"), coin.get("score"),
+                   json.dumps(coin.get("features", {})), time.time()))
+        c.commit()
+    finally:
+        c.close()                                        # always close, even on error (#12)
 
 def _rpc(method, params, retries=4):
     for i in range(retries):
         try:
             r = requests.post(RPC, timeout=15, json={"jsonrpc":"2.0","id":1,"method":method,"params":params})
-            if r.status_code == 429: time.sleep(1.5*(i+1)); continue
+            if r.status_code == 429: time.sleep(float(r.headers.get("Retry-After") or 1.5*(i+1))); continue   # honor Retry-After (#13)
             res = r.json()
             if "result" in res: return res["result"]
             time.sleep(1.0*(i+1))
@@ -59,12 +63,13 @@ def _dexscreener(mint):
     except Exception:
         return {}
     if not pairs: return {"migrated": 0}
-    real = [p for p in pairs if (p.get("dexId") or "").lower() not in ("pumpfun", "pump")]  # graduated off the curve
+    real = [p for p in pairs if (p.get("dexId") or "").lower() in GRADUATED_DEXES]  # whitelist real DEXes (#9)
     use = real or pairs
     deepest = max(use, key=lambda x: (x.get("liquidity") or {}).get("usd") or 0)
+    pu = deepest.get("priceUsd")
     return {"migrated": 1 if real else 0,            # 1 only if listed on a real DEX, not the pump.fun curve
             "dex": deepest.get("dexId"),
-            "price_usd": float(deepest.get("priceUsd") or 0) or None,
+            "price_usd": float(pu) if pu not in (None, "") else None,   # preserve a real 0 (#15)
             "liq_usd": round(sum((p.get("liquidity") or {}).get("usd") or 0 for p in use), 2),
             "vol24h": round(sum((p.get("volume") or {}).get("h24") or 0 for p in use), 2),
             "mcap": deepest.get("marketCap")}
@@ -77,9 +82,9 @@ def collect_outcome(mint):
         out["last_trade_age_h"] = round((time.time() - sigs[0]["blockTime"]) / 3600, 2)
     sup = _rpc("getTokenSupply", [mint]); largest = _rpc("getTokenLargestAccounts", [mint])
     if sup and largest and largest.get("value"):
-        total = float(sup["value"]["amount"]) or 1.0
+        total = float(sup["value"]["amount"])
         amts = sorted((float(a["amount"]) for a in largest["value"]), reverse=True)
-        if amts:
+        if total > 0 and amts:                       # guard zero supply -> no garbage percentage (#3)
             out["top1_pct"] = round(100*amts[0]/total, 1); out["top5_pct"] = round(100*sum(amts[:5])/total, 1)
     out.update(_dexscreener(mint))
     return out
@@ -90,14 +95,16 @@ def label(o):
     so we don't claim RUG here. Real RUG = liquidity DROPPING across the T+6/24/72h checks, which the
     repeated-check design enables (P2.5)."""
     liq = o.get("liq_usd") or 0; vol = o.get("vol24h") or 0; mc = o.get("mcap") or 0
+    concentrated = (o.get("top1_pct") or 0) > 90 or (o.get("top5_pct") or 0) > 98
     if o.get("migrated"):                                # has a tradeable pair
-        if vol > 5000 and mc > 50000 and liq > 10000: return "MOON"   # real liquidity + volume + cap
         if liq < 1000 and vol < 100: return "DEAD"       # listed but empty (dead or already drained)
+        if concentrated: return "ALIVE-CONCENTRATED"     # graduated but whale-held -> not "good" (#10)
+        if vol > 5000 and mc > 50000 and liq > 10000: return "MOON"   # real liquidity + volume + cap
         return "FLAT"                                    # listed, middling
     age = o.get("last_trade_age_h")
     if age is None: return "UNKNOWN"
     if age > DEAD_SILENCE_H: return "DEAD"               # died on the bonding curve (the usual fate)
-    if (o.get("top1_pct") or 0) > 90 or (o.get("top5_pct") or 0) > 98: return "ALIVE-CONCENTRATED"
+    if concentrated: return "ALIVE-CONCENTRATED"
     return "ALIVE"
 
 def _apply(mint, c):
@@ -109,28 +116,33 @@ def _apply(mint, c):
     c.commit(); return lab, o
 
 def run():
-    c = _db(); now = time.time()
-    due = c.execute("SELECT mint FROM scored WHERE outcome IS NULL AND scored_at <= ?",
-                    (now - CHECK_AFTER_H*3600,)).fetchall()
-    print(f"{len(due)} coins due for outcome check")
-    for (mint,) in due:
-        lab, o = _apply(mint, c)
-        print(f"  {mint[:14]}.. -> {lab}  (age {o['last_trade_age_h']}h, migrated {o['migrated']}, liq ${o['liq_usd']})")
-    c.close()
+    c = _db()
+    try:
+        now = time.time()
+        due = c.execute("SELECT mint FROM scored WHERE (outcome IS NULL OR outcome='UNKNOWN') AND scored_at <= ?",
+                        (now - CHECK_AFTER_H*3600,)).fetchall()   # also recheck UNKNOWN (#8)
+        print(f"{len(due)} coins due for outcome check")
+        for (mint,) in due:
+            lab, o = _apply(mint, c)
+            print(f"  {mint[:14]}.. -> {lab}  (age {o['last_trade_age_h']}h, migrated {o['migrated']}, liq ${o['liq_usd']})")
+    finally:
+        c.close()
 
 def stats():
     c = _db()
-    rows = c.execute("SELECT outcome, COUNT(*) FROM scored WHERE outcome IS NOT NULL GROUP BY outcome").fetchall()
-    print("label distribution:", dict(rows))
-    bands = c.execute("""SELECT CASE WHEN score>=4 THEN 'high(>=4)' WHEN score>=1 THEN 'mid(1-3)' ELSE 'low(<1)' END band,
-                                COUNT(*) n,
-                                SUM(outcome IN ('MOON','FLAT','ALIVE')) survived,
-                                SUM(outcome='MOON') mooned
-                         FROM scored WHERE outcome IS NOT NULL GROUP BY band""").fetchall()
-    print("by engine score band (the backtest: does a higher score predict a better outcome?):")
-    for band, n, surv, moon in bands:
-        print(f"  {band:10} n={n}  survived {100*(surv or 0)//max(n,1)}%  mooned {moon or 0}")
-    c.close()
+    try:
+        rows = c.execute("SELECT outcome, COUNT(*) FROM scored WHERE outcome IS NOT NULL GROUP BY outcome").fetchall()
+        print("label distribution:", dict(rows))
+        bands = c.execute("""SELECT CASE WHEN score>=4 THEN 'high(>=4)' WHEN score>=1 THEN 'mid(1-3)' ELSE 'low(<1)' END band,
+                                    COUNT(*) n,
+                                    SUM(outcome IN ('MOON','FLAT','ALIVE')) survived,
+                                    SUM(outcome='MOON') mooned
+                             FROM scored WHERE outcome IS NOT NULL GROUP BY band""").fetchall()
+        print("by engine score band (the backtest: does a higher score predict a better outcome?):")
+        for band, n, surv, moon in bands:
+            print(f"  {band:10} n={n}  survived {100*(surv or 0)//max(n,1)}%  mooned {moon or 0}")
+    finally:
+        c.close()
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
