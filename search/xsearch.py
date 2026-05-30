@@ -100,6 +100,12 @@ def extract_session(data):
     return out
 
 
+def _drain_budget(first, delay):
+    """Seconds to wait for a SearchTimeline response. The non-first budget tracks the scroll delay
+    so a slow response is not cut off and pagination is not truncated (finding #2)."""
+    return 6.0 if first else max(2.0, delay / 1000.0 + 1.5)
+
+
 # ---------- backend: session (free, rides your X login) ----------
 async def find_session(query, tab, pages, delay, headed):
     if not STATE.exists():
@@ -118,7 +124,7 @@ async def find_session(query, tab, pages, delay, headed):
     async def drain(first=False):
         # Wait for the SearchTimeline response to arrive (poll, exit early once it does), then parse
         # every queued body. Longer budget on the first pass; X can answer slower than a fixed sleep.
-        budget = 6.0 if first else 2.0
+        budget = _drain_budget(first, delay)
         waited = 0.0
         while waited < budget and bodies.empty():
             await asyncio.sleep(0.5); waited += 0.5
