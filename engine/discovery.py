@@ -33,7 +33,7 @@ def xai_x_search(query):
         r.raise_for_status()
         d = r.json()
     except Exception:
-        return []
+        return None     # transport/HTTP failure is "not searched" (#4), not "found nobody"
     cites = []
     def walk(o):
         if isinstance(o, dict):
