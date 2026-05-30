@@ -86,8 +86,7 @@ def _reset():
 def run(src):
     _reset()
     events = [json.loads(l) for l in open(src) if l.strip()]
-    has_ts = bool(events) and "_ts" in events[0]      # live stamps _ts; captures predating that lack it
-    if not has_ts:
+    if events and not any("_ts" in e for e in events):
         print("note: capture has no _ts (pre-reconcile); index-window dedup, not identical to a live run")
     print(f"replaying {len(events)} mints (engine_core logic) ...")
     ex = ThreadPoolExecutor(max_workers=8)
@@ -95,7 +94,8 @@ def run(src):
         buy = ev.get("solAmount") or 0; nm = norm_name(ev.get("name"))
         by_creator[ev.get("traderPublicKey")].append(ev.get("mint"))
         devbuf.append(buy)
-        dup = dedup_name(nm, ev["_ts"], last_name) if has_ts else dedup_name(nm, i, last_name, window=DEDUP_IDX_FALLBACK)
+        ts = ev.get("_ts")                                  # per-event so a mixed capture cannot KeyError (#1)
+        dup = dedup_name(nm, ts, last_name) if ts is not None else dedup_name(nm, i, last_name, window=DEDUP_IDX_FALLBACK)
         if dup:
             gaps["dedup_name"] += 1; continue
         z = zone_of(buy, list(devbuf)); zone_count[z] += 1
@@ -114,7 +114,8 @@ def run(src):
             if wc > 1 and ac > 1: s["score"] -= 1; tags.append("BOTH")
             s["notes"].append("+".join(tags)); s["serial"] = max(wc, ac)
 
-    n = len(events); buf = sorted(devbuf); p80 = buf[int(.8*len(buf))]; p95 = buf[int(.95*len(buf))]
+    n = len(events); buf = sorted(devbuf)
+    p80 = buf[int(.8*len(buf))] if buf else 0; p95 = buf[int(.95*len(buf))] if buf else 0   # guard empty capture (#7)
     print("\n" + "=" * 66)
     print(f"REPLAY (core)  |  {n} mints  |  SPC p80={p80:.2f} p95={p95:.2f} SOL")
     print(f"zones: green {zone_count['green']} | amber {zone_count['amber']} | red {zone_count['red']} | dedup {gaps['dedup_name']}")
