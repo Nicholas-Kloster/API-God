@@ -4,7 +4,7 @@ import asyncio, json, os, time, sys, threading
 from collections import deque, defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
 import websockets, requests
-from engine_core import norm_name, cashtag_hit, classify, zone_of, score_resolved, fetch_meta, independent_bonus, dedup_name
+from engine_core import norm_name, cashtag_hit, classify, zone_of, score_resolved, fetch_meta, independent_bonus, dedup_name, cluster_penalty
 from discovery import discover_independent
 from outcomes import record
 
@@ -156,9 +156,9 @@ def summarize():
     wsize = {c: len(m) for c, m in by_creator.items()}; asize = {a: len(m) for a, m in by_author.items() if a}
     for s in survivors:
         wc = wsize.get(s["creator"], 1); ac = asize.get(s.get("author"), 1)
-        if wc > 1 or ac > 1:
-            s["score"] -= 2 + (1 if wc > 1 and ac > 1 else 0); s["serial"] = max(wc, ac)
-            s["notes"].append(f"cluster w{wc}/a{ac}")
+        new_score, note, serial = cluster_penalty(s["score"], wc, ac)
+        if note:
+            s["score"] = new_score; s["serial"] = serial; s["notes"].append(note)
     for s in survivors:                                  # outcome-ledger record: AFTER clustering (serial known), single-threaded (no race)
         try:
             record({"mint": s.get("mint"), "creator": s.get("creator"), "score": s.get("score"),

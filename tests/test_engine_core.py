@@ -2,7 +2,7 @@
 any fix or refactor. Ports the stress.py adversarial cases; the two known-open BUILD gaps
 are documented xfail so they are tracked, not silently failing."""
 from engine_core import (norm_name, cashtag_hit, classify, zone_of,
-                         score_resolved, independent_bonus, dedup_name)
+                         score_resolved, independent_bonus, dedup_name, cluster_penalty)
 import pytest
 
 
@@ -60,6 +60,15 @@ def test_dedup_name_time_window():
     assert dedup_name("a", 1100.0, seen) is True           # within 300s
     assert dedup_name("a", 1500.0, seen) is False          # outside 300s of last
     assert dedup_name("", 1.0, seen) is False              # empty never dedups
+
+
+def test_cluster_penalty_canonical():
+    s, note, serial = cluster_penalty(3, 3, 1)
+    assert s == 1 and serial == 3 and "w3" in note          # repeated wallet -> -2
+    s2, note2, ser2 = cluster_penalty(3, 2, 2)
+    assert s2 == 0 and ser2 == 2 and "BOTH" in note2        # both repeat -> -3
+    s3, note3, ser3 = cluster_penalty(3, 1, 1)
+    assert s3 == 3 and ser3 == 1 and note3 == ""            # no cluster -> unchanged
 
 
 @pytest.mark.xfail(reason="known-open BUILD gap: self-attested perfect fake scores high", strict=True)

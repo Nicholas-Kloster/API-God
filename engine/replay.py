@@ -5,7 +5,7 @@ import json, sys, threading
 from collections import deque, defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
 import requests
-from engine_core import norm_name, cashtag_hit, classify, zone_of, score_resolved, fetch_meta, independent_bonus, dedup_name
+from engine_core import norm_name, cashtag_hit, classify, zone_of, score_resolved, fetch_meta, independent_bonus, dedup_name, cluster_penalty
 from discovery import discover_independent
 
 ROLL = 200; DEDUP_IDX_FALLBACK = 50   # index-window dedup only for old captures that predate _ts
@@ -107,12 +107,9 @@ def run(src):
     wsize = {c: len(m) for c, m in by_creator.items()}; asize = {a: len(m) for a, m in by_author.items() if a}
     for s in survivors:
         wc = wsize.get(s["creator"], 1); ac = asize.get(s.get("author"), 1)
-        if wc > 1 or ac > 1:
-            s["score"] -= 2; tags = []
-            if wc > 1: tags.append(f"wallet x{wc}")
-            if ac > 1: tags.append(f"author x{ac}")
-            if wc > 1 and ac > 1: s["score"] -= 1; tags.append("BOTH")
-            s["notes"].append("+".join(tags)); s["serial"] = max(wc, ac)
+        new_score, note, serial = cluster_penalty(s["score"], wc, ac)
+        if note:
+            s["score"] = new_score; s["serial"] = serial; s["notes"].append(note)
 
     n = len(events); buf = sorted(devbuf)
     p80 = buf[int(.8*len(buf))] if buf else 0; p95 = buf[int(.95*len(buf))] if buf else 0   # guard empty capture (#7)

@@ -88,6 +88,20 @@ def independent_bonus(n_ca, n_ticker=0):
         parts.append(tag)
     return s, "; ".join(parts)
 
+def cluster_penalty(score, wallet_count, author_count):
+    """Single source for the serial-wallet/author penalty, shared by live and replay so a replay's
+    cluster scoring AND notes match a live run exactly (finding #6). Returns (new_score, note, serial).
+    note is "" when there is no cluster. -2 for a repeated wallet or author, -3 when both repeat."""
+    wc, ac = wallet_count, author_count
+    if wc <= 1 and ac <= 1:
+        return score, "", 1
+    pen = 2 + (1 if wc > 1 and ac > 1 else 0)
+    tags = []
+    if wc > 1: tags.append(f"w{wc}")
+    if ac > 1: tags.append(f"a{ac}")
+    if wc > 1 and ac > 1: tags.append("BOTH")
+    return score - pen, "cluster " + "/".join(tags), max(wc, ac)
+
 def fetch_meta(uri, gateways, requests, max_bytes=1_000_000, timeout=6):
     """FIX: streamed fetch with early abort at max_bytes (zip-bomb / OOM guard) + tighter timeout."""
     last = None
