@@ -22,7 +22,7 @@ def _featurize(features_json):
     f = json.loads(features_json or "{}")
     return [1.0 if f.get("zone") == "red" else 0.0,
             1.0 if f.get("verified") else 0.0,
-            float(f.get("independent") or 0),
+            1.0 if (f.get("independent") or 0) >= 2 else 0.0,   # bin to match discrete_features for MI (#16)
             1.0 if (f.get("serial") or 1) > 1 else 0.0]
 
 def _load(db):
@@ -46,8 +46,12 @@ def calibrate(db=DB, out=WEIGHTS):
     from sklearn.linear_model import LogisticRegression
     from sklearn.feature_selection import mutual_info_classif
     from sklearn.model_selection import train_test_split
-    strat = y if min(np.bincount(y)) > 1 else None
-    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=42, stratify=strat)
+    need = max(2, int(np.ceil(1 / 0.2)))                 # stratify needs enough in the minority class
+    strat = y if min(np.bincount(y)) >= need else None   # #5 defensive: do not stratify on a tiny minority
+    try:
+        Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=42, stratify=strat)
+    except ValueError:
+        Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=42)
     m = LogisticRegression(class_weight="balanced", max_iter=2000).fit(Xtr, ytr)
     tr, te = m.score(Xtr, ytr), m.score(Xte, yte)
     mi = mutual_info_classif(X, y, discrete_features=[True, True, True, True], random_state=42)  # independent is a small count
@@ -72,7 +76,7 @@ def selftest():
     """Synthetic data where a good outcome is driven by verified + independent posters and hurt by serial
     farming. The calibrator should recover those signs (positive verified/independent, negative serial)."""
     import tempfile, random
-    p = tempfile.mktemp(suffix=".db"); c = sqlite3.connect(p)
+    fd, p = tempfile.mkstemp(suffix=".db"); os.close(fd); c = sqlite3.connect(p)   # mkstemp, not deprecated mktemp (#14)
     c.execute("CREATE TABLE scored(features TEXT, outcome TEXT)")
     rng = random.Random(1)
     for _ in range(200):
