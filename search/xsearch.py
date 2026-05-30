@@ -100,10 +100,66 @@ def extract_session(data):
     return out
 
 
+def _tweet_ts(created_at):
+    """X created_at ('Wed Oct 10 20:19:24 +0000 2018') -> epoch seconds, for correct recency sort.
+    Sorting the raw string sorts by day-name, not time, so a tracker must parse it."""
+    import email.utils
+    try:
+        return email.utils.parsedate_to_datetime(created_at).timestamp()
+    except Exception:
+        return 0.0
+
+
+def extract_user_timeline(data):
+    """Walk a UserTweets / UserTweetsAndReplies GraphQL body -> list of rich records. The tweet shape
+    is identical to search; only the outer timeline path differs (user.result.timeline_v2)."""
+    out = []
+    ins_list = None
+    for path in (("user", "result", "timeline_v2"), ("user", "result", "timeline")):
+        node = data.get("data", {})
+        for k in path:
+            node = node.get(k, {}) if isinstance(node, dict) else {}
+        try:
+            ins_list = node["timeline"]["instructions"]
+            break
+        except (KeyError, TypeError):
+            continue
+    if not ins_list:
+        return out
+    for ins in ins_list:
+        if ins.get("type") != "TimelineAddEntries":
+            continue
+        for entry in ins.get("entries", []):
+            content = entry.get("content", {})
+            ic = content.get("itemContent", {})
+            if ic.get("itemType") == "TimelineTweet":
+                r = _parse_timeline_tweet(ic)
+                if r: out.append(r)
+            for item in content.get("items", []):                 # self-thread / conversation modules
+                ic2 = item.get("item", {}).get("itemContent", {})
+                if ic2.get("itemType") == "TimelineTweet":
+                    r = _parse_timeline_tweet(ic2)
+                    if r: out.append(r)
+    return out
+
+
 def _drain_budget(first, delay):
     """Seconds to wait for a SearchTimeline response. The non-first budget tracks the scroll delay
     so a slow response is not cut off and pagination is not truncated (finding #2)."""
     return 6.0 if first else max(2.0, delay / 1000.0 + 1.5)
+
+
+def _probe_report(log):
+    """log = [(http_status, seconds_since_start), ...] for each SearchTimeline response. The first
+    non-200 is where X cut us off; everything before it is how far we got before the rate-limit wall."""
+    statuses = [s for s, _ in log]
+    limit_idx = next((i for i, s in enumerate(statuses) if s != 200), None)
+    ok = limit_idx if limit_idx is not None else sum(1 for s in statuses if s == 200)
+    limit_status = statuses[limit_idx] if limit_idx is not None else None
+    limit_at_s = round(log[limit_idx][1], 1) if limit_idx is not None else (round(log[-1][1], 1) if log else 0.0)
+    rate = round(len(log) / (log[-1][1] / 60), 1) if log and log[-1][1] > 0 else 0.0
+    return {"requests": len(log), "ok_before_limit": ok, "limit_status": limit_status,
+            "limit_at_s": limit_at_s, "rate_per_min": rate}
 
 
 # ---------- backend: session (free, rides your X login) ----------
@@ -149,6 +205,89 @@ async def find_session(query, tab, pages, delay, headed):
                 break
         await b.close()
     return list(seen.values())
+
+
+# ---------- backend: track (free, rides session, SEPARATE rate-limit bucket from search) ----------
+async def find_track(handle, replies, pages, delay, headed):
+    """Track one account via its own timeline (UserTweets / UserTweetsAndReplies). This is a different
+    GraphQL endpoint than search, so it has its own rate-limit budget: it keeps serving 200 while
+    SearchTimeline is 429'd (proven 2026-05-30), and it is the real timeline, lower latency than search."""
+    if not STATE.exists():
+        print("[track] no saved session (run: python xsearch.py --login) - skipping", file=sys.stderr)
+        return []
+    from playwright.async_api import async_playwright
+    handle = handle.lstrip("@")
+    url = f"https://x.com/{handle}" + ("/with_replies" if replies else "")
+    marker = "UserTweetsAndReplies" if replies else "UserTweets"
+    seen = {}
+    bodies = asyncio.Queue()
+
+    async def on_response(resp):
+        if marker in resp.url:
+            try: await bodies.put(await resp.json())
+            except Exception: pass
+
+    async def drain(first=False):
+        budget = _drain_budget(first, delay)
+        waited = 0.0
+        while waited < budget and bodies.empty():
+            await asyncio.sleep(0.5); waited += 0.5
+        while not bodies.empty():
+            for r in extract_user_timeline(await bodies.get()):
+                if r["id"] not in seen:
+                    seen[r["id"]] = r
+
+    async with async_playwright() as pw:
+        b = await pw.chromium.launch(headless=not headed, args=["--disable-blink-features=AutomationControlled"])
+        c = await b.new_context(storage_state=str(STATE))
+        p = await c.new_page()
+        p.on("response", on_response)
+        await p.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await drain(first=True)
+        for _ in range(max(0, pages - 1)):
+            before = len(seen)
+            await p.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await p.wait_for_timeout(delay)
+            await drain()
+            if len(seen) == before:
+                break
+        await b.close()
+    return list(seen.values())
+
+
+# ---------- rate-limit probe (burner-account only) ----------
+async def probe_session(url, marker, max_req, delay):
+    """Hammer one endpoint by scrolling `url` up to max_req times, log every `marker` response's HTTP
+    status with a timestamp, and stop at the first non-200 (where X cuts us off). Run on a throwaway
+    account: finding the limit means tripping it."""
+    if not STATE.exists():
+        sys.exit("[probe] no saved session (run: python xsearch.py --login)")
+    from playwright.async_api import async_playwright
+    import time as _time
+    log = []
+    start = _time.monotonic()
+    hit = asyncio.Event()
+
+    async def on_response(resp):
+        if marker in resp.url:
+            log.append((resp.status, _time.monotonic() - start))
+            if resp.status != 200:                              # the wall: stop, do not keep hammering
+                hit.set()
+
+    async with async_playwright() as pw:
+        b = await pw.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        c = await b.new_context(storage_state=str(STATE))
+        p = await c.new_page()
+        p.on("response", on_response)
+        await p.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await p.wait_for_timeout(1500)
+        for _ in range(max_req):
+            if hit.is_set():
+                break
+            await p.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await p.wait_for_timeout(delay)
+        await b.close()
+    return log
 
 
 # ---------- backend: xai (clean, ~$0.005/search, no account risk) ----------
@@ -210,27 +349,24 @@ def merge(*lists):
     return list(by_id.values())
 
 
-async def run(args):
-    backends = {"session": ["session"], "xai": ["xai"], "both": ["session", "xai"]}[args.backend]
-    tasks = []
-    if "session" in backends:
-        tasks.append(find_session(args.query, args.tab, args.pages, args.delay, args.headed))
-    if "xai" in backends:
-        tasks.append(asyncio.to_thread(find_xai, args.query))
-    results = await asyncio.gather(*tasks)
-    posts = merge(*results)
+def _emit(posts, args):
+    """Shared output: JSONL (--json/--out), or readable. Track mode lists tweets newest/top first;
+    search mode lists the distinct accounts talking, tagged by which backend(s) found each."""
     if not posts:
         sys.exit("no results (check --login for session, or XAI_API_KEY for xai)")
-    key = (lambda r: r["likes"] + r["reposts"]) if args.sort == "engagement" else (lambda r: r["time"])
+    key = (lambda r: r["likes"] + r["reposts"]) if args.sort == "engagement" else (lambda r: _tweet_ts(r["time"]))
     posts.sort(key=key, reverse=True)
-
     if args.json or args.out:
         out = open(args.out, "w") if args.out else sys.stdout
         for r in posts: print(json.dumps(r), file=out)
         if args.out: out.close(); print(f"{len(posts)} posts -> {args.out}", file=sys.stderr)
         return
-
-    # readable: distinct accounts, each shown by their top post, tagged by which backend(s) found them
+    if getattr(args, "track", False):                          # track: a tweet stream, top/newest first
+        print(f"{len(posts)} tweets from @{args.query.lstrip('@')}\n")
+        for r in posts[:args.limit]:
+            print(f"{r['time'][:16]}  ♥{r['likes']:>6} ↻{r['reposts']:>5} 👁{r.get('views',0):>8}  {r['text'][:80]}")
+        return
+    # search: distinct accounts, each shown by their top post, tagged by which backend(s) found them
     by_acct = {}
     for r in posts:
         cur = by_acct.get(r["handle"])
@@ -251,16 +387,40 @@ async def run(args):
               f"♥{r['likes']:>6} ↻{r['reposts']:>5} 👁{r.get('views',0):>8}  {r['text'][:64]}")
 
 
+async def run(args):
+    backends = {"session": ["session"], "xai": ["xai"], "both": ["session", "xai"]}[args.backend]
+    tasks = []
+    if "session" in backends:
+        tasks.append(find_session(args.query, args.tab, args.pages, args.delay, args.headed))
+    if "xai" in backends:
+        tasks.append(asyncio.to_thread(find_xai, args.query))
+    results = await asyncio.gather(*tasks)
+    posts = merge(*results)
+    _emit(posts, args)
+
+
+def _logged_in(cookies):
+    """True once X has set the login cookie. auth_token is the httpOnly proof of a real session; a
+    guest/logged-out context never has it (finding 2026-05-30: --login silently saved guest sessions)."""
+    return any(ck.get("name") == "auth_token" for ck in cookies)
+
+
 async def login():
     from playwright.async_api import async_playwright
     STATE.parent.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as pw:
-        b = await pw.chromium.launch(headless=False); c = await b.new_context(); p = await c.new_page()
+        b = await pw.chromium.launch(headless=False)
+        c = await b.new_context(); p = await c.new_page()
         await p.goto("https://x.com/login")
-        print("Log in to X, then press Enter here to save the session...")
-        input()
+        print("Log in to X in the window. Waiting for login (auth_token)...", file=sys.stderr)
+        for _ in range(300):                                   # poll up to ~5 min, no Enter needed
+            if _logged_in(await c.cookies()):
+                break
+            await asyncio.sleep(1)
+        else:
+            await b.close(); sys.exit("login not detected (no auth_token after 5 min) - nothing saved")
         await c.storage_state(path=str(STATE)); await b.close()
-    print(f"session saved -> {STATE}")
+    print(f"session saved -> {STATE}", file=sys.stderr)
 
 
 def main():
@@ -276,9 +436,32 @@ def main():
     ap.add_argument("--out", help="write JSONL of every post")
     ap.add_argument("--json", action="store_true", help="JSONL to stdout")
     ap.add_argument("--headed", action="store_true")
+    ap.add_argument("--track", action="store_true",
+                    help="track a @handle via its timeline (UserTweets) - a SEPARATE rate-limit bucket from search")
+    ap.add_argument("--replies", action="store_true", help="track: include @-replies (UserTweetsAndReplies)")
+    ap.add_argument("--probe", action="store_true",
+                    help="rate-limit probe: hammer the endpoint until X returns a non-200, report the cutoff")
+    ap.add_argument("--max-req", type=int, default=120, help="probe: max requests to fire")
     args = ap.parse_args()
     if args.login: asyncio.run(login()); return
-    if not args.query: ap.error("give a query, or --login first")
+    if not args.query: ap.error("give a query/handle, or --login first")
+    if args.probe:
+        from collections import Counter
+        if args.track:
+            h = args.query.lstrip("@")
+            url = f"https://x.com/{h}" + ("/with_replies" if args.replies else "")
+            marker = "UserTweetsAndReplies" if args.replies else "UserTweets"
+        else:
+            url = f"https://x.com/search?q={quote(args.query)}&src=typed_query&f={args.tab}"
+            marker = "SearchTimeline"
+        log = asyncio.run(probe_session(url, marker, args.max_req, args.delay))
+        print(json.dumps({"endpoint": marker, **_probe_report(log)}, indent=2))
+        print("status counts:", dict(Counter(s for s, _ in log)), file=sys.stderr)
+        return
+    if args.track:
+        posts = asyncio.run(find_track(args.query, args.replies, args.pages, args.delay, args.headed))
+        _emit(posts, args)
+        return
     asyncio.run(run(args))
 
 
