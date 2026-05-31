@@ -3,20 +3,23 @@
 
 X runs a server-push channel at api.x.com/live_pipeline. You open one long-lived NDJSON stream and
 subscribe to topics like /tweet_engagement/<tweet_id>; X then pushes a new payload every time that
-tweet's like/repost/reply/quote counts change. No polling, so no rate-limit tax. This rides the saved
-session (cookies + csrf, no API key), exactly like the rest of the toolkit, and turns the deltas into
-a velocity signal, which is what a momentum engine wants.
+tweet's like/repost/reply counts change. No polling, so no rate-limit tax. Rides the saved session
+(cookies + csrf, no API key), and turns the deltas into a velocity signal.
 
-Captured contract (our own session, 2026-05-31):
-  GET  api.x.com/live_pipeline/events?topic=/tweet_engagement/<id>      -> 200, NDJSON
-       first line: {"topic":"/system/config","payload":{"config":{"session_id","subscription_ttl_millis":120000,"heartbeat_millis":25000}}}
-  POST api.x.com/1.1/live_pipeline/update_subscriptions  (x-www-form-urlencoded)
-       body: sub_topics=/tweet_engagement/<id>,...  unsub_topics=...     (add/remove, many at once)
+Contract (captured + verified, our own session, 2026-05-31):
+  GET  api.x.com/live_pipeline/events?topic=/tweet_engagement/<id>   -> 200 NDJSON over HTTP/2.
+       first line: {"topic":"/system/config","payload":{"config":{"session_id",...,"subscription_ttl_millis":120000,"heartbeat_millis":25000}}}
+  POST api.x.com/1.1/live_pipeline/update_subscriptions
+       header  LivePipeline-Session: <session_id>     (REQUIRED; missing -> 400 code 38)
+       body    sub_topics=/tweet_engagement/<id>,...  unsub_topics=...
+  Multi-subscribe only works when the POST shares the stream's connection (HTTP/2) AND carries the
+  session header. Both matter: plain requests on HTTP/1.1 without the header is a silent no-op.
 
   python livepipe.py <tweet_id> [<tweet_id> ...] [--seconds=N]
 """
-import json, sys, time, re, requests
+import json, sys, time, re
 from pathlib import Path
+import httpx
 
 STATE = Path.home() / ".x-session" / "state.json"
 # public X web-app bearer (a constant, not a secret); the real auth is the session cookies
@@ -26,25 +29,30 @@ EVENTS = "https://api.x.com/live_pipeline/events"
 SUBS = "https://api.x.com/1.1/live_pipeline/update_subscriptions"
 
 
-def _session():
-    """A requests.Session carrying the saved X cookies + the headers live_pipeline checks."""
+def _client():
+    """An HTTP/2 httpx.Client carrying the saved X cookies + the headers live_pipeline checks.
+    HTTP/2 is required so the subscribe POST multiplexes onto the stream's connection."""
     d = json.loads(STATE.read_text())
-    s = requests.Session()
-    for c in d.get("cookies", []):
-        if c.get("name") and c.get("value"):
-            s.cookies.set(c["name"], c["value"], domain=(c.get("domain") or "x.com").lstrip("."))
-    ct0 = next((c["value"] for c in d.get("cookies", []) if c["name"] == "ct0"), "")
-    s.headers.update({
-        "authorization": BEARER, "x-csrf-token": ct0, "x-twitter-auth-type": "OAuth2Session",
-        "x-twitter-active-user": "yes",
+    cookies = {c["name"]: c["value"] for c in d.get("cookies", []) if c.get("name") and c.get("value")}
+    headers = {
+        "authorization": BEARER, "x-csrf-token": cookies.get("ct0", ""),
+        "x-twitter-auth-type": "OAuth2Session", "x-twitter-active-user": "yes",
         "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    })
-    return s
+    }
+    return httpx.Client(http2=True, cookies=cookies, headers=headers, timeout=httpx.Timeout(40.0, connect=10.0))
+
+
+def subscribe(client, session_id, ids, unsub=()):
+    """Add/remove /tweet_engagement topics on the open connection. The LivePipeline-Session header
+    (the session_id from /system/config) is required, or X returns 400 code 38."""
+    data = {"sub_topics": ",".join("/tweet_engagement/" + str(i) for i in ids),
+            "unsub_topics": ",".join("/tweet_engagement/" + str(i) for i in unsub)}
+    return client.post(SUBS, headers={"LivePipeline-Session": session_id}, data=data)
 
 
 def parse_engagement(payload):
-    """Pull the counts out of a tweet_engagement payload. Defensive: the exact nesting is read off the
-    live event, so we scan the payload JSON for the known count fields wherever they sit."""
+    """Pull the counts out of a tweet_engagement payload. Events push the count that changed, so we
+    scan for whatever count fields are present."""
     flat = json.dumps(payload)
     out = {}
     for k in ("favorite_count", "retweet_count", "reply_count", "quote_count", "view_count", "bookmark_count"):
@@ -54,52 +62,44 @@ def parse_engagement(payload):
     return out
 
 
-def subscribe(s, ids):
-    """Add /tweet_engagement topics to the open connection (many at once)."""
-    subs = ",".join("/tweet_engagement/" + str(i) for i in ids)
-    s.post(SUBS, data={"sub_topics": subs, "unsub_topics": ""}, timeout=10)
-
-
 def stream(ids, seconds=0):
-    s = _session()
-    first, rest = str(ids[0]), [str(i) for i in ids[1:]]
-    r = s.get(EVENTS, params={"topic": "/tweet_engagement/" + first}, stream=True, timeout=(10, 35))
-    print(f"[livepipe] connected {r.status_code}; watching {len(ids)} tweet(s)", file=sys.stderr)
-    if r.status_code != 200:
-        sys.exit(f"[livepipe] connect failed: {r.status_code} {r.text[:120]}")
-    if rest:
-        try: subscribe(s, rest)
-        except Exception as e: print(f"[livepipe] subscribe: {e}", file=sys.stderr)
-    last = {}                                            # tweet_id -> (counts, t)
-    start = time.time()
-    try:
-        for line in r.iter_lines():
-            if seconds and time.time() - start > seconds:
-                break
-            if not line:
-                continue
-            try: ev = json.loads(line)
-            except Exception: continue
-            top = ev.get("topic", "")
-            if not top.startswith("/tweet_engagement/"):
-                continue                                 # /system/config, /system/subscriptions, heartbeats
-            tid = top.rsplit("/", 1)[-1]
-            counts = parse_engagement(ev.get("payload", {}))
-            if not counts:
-                continue
-            now, vel = time.time(), ""
-            if tid in last:
-                pc, pt = last[tid]; dt = now - pt
-                dlike = counts.get("favorite_count", 0) - pc.get("favorite_count", 0)
-                drt = counts.get("retweet_count", 0) - pc.get("retweet_count", 0)
-                if dt > 0:
-                    vel = f"   velocity +{dlike}like +{drt}rt in {dt:.0f}s = {(dlike + drt) / dt * 60:.0f}/min"
-            last[tid] = (counts, now)
-            print(f"{tid}  {counts}{vel}", flush=True)
-    except requests.exceptions.ReadTimeout:
-        print("[livepipe] idle past the read window (no deltas); connection was healthy", file=sys.stderr)
-    finally:
-        r.close()
+    last, start = {}, time.time()
+    with _client() as client:
+        with client.stream("GET", EVENTS, params={"topic": "/tweet_engagement/" + str(ids[0])}) as r:
+            print(f"[livepipe] connected {r.status_code} ({r.http_version}); watching {len(ids)} tweet(s)", file=sys.stderr)
+            if r.status_code != 200:
+                sys.exit(f"[livepipe] connect failed: {r.status_code}")
+            sid = None
+            for line in r.iter_lines():
+                if seconds and time.time() - start > seconds:
+                    break
+                if not line:
+                    continue
+                try: ev = json.loads(line)
+                except Exception: continue
+                top = ev.get("topic", "")
+                if top == "/system/config" and sid is None:        # grab the session id, then subscribe the rest
+                    sid = ev.get("payload", {}).get("config", {}).get("session_id")
+                    if sid and ids[1:]:
+                        try: subscribe(client, sid, ids[1:])
+                        except Exception as e: print(f"[livepipe] subscribe: {e}", file=sys.stderr)
+                    continue
+                if not top.startswith("/tweet_engagement/"):
+                    continue
+                tid = top.rsplit("/", 1)[-1]
+                counts = parse_engagement(ev.get("payload", {}))
+                if not counts:
+                    continue
+                now = time.time()
+                hist = last.setdefault(tid, {})                   # field -> (value, t); events carry one field at a time
+                parts = []
+                for f, v in counts.items():
+                    if f in hist:                                 # only after a baseline for that field
+                        pv, pt = hist[f]; dt = now - pt
+                        if dt > 0 and v != pv:
+                            parts.append(f"{f.split('_')[0]} +{v - pv} ({(v - pv) / dt * 60:.0f}/min)")
+                    hist[f] = (v, now)
+                print(f"{tid}  {counts}" + (("   " + "  ".join(parts)) if parts else ""), flush=True)
 
 
 def main():
