@@ -17,10 +17,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import xsearch, livepipe
 
 
-def _reader(first_id, subq, sink, stop):
+def evict_targets(subscribed, activity, n_new, max_slots, protect=()):
+    """The velocity gate. Which currently-subscribed tweets to drop so n_new arrivals fit in max_slots,
+    coldest (least-recently-active) first. Protected ids (the stream's own topic) are never dropped.
+    Returns [] when there is room."""
+    overflow = len(subscribed) + n_new - max_slots
+    if overflow <= 0:
+        return []
+    evictable = sorted((t for t in subscribed if t not in protect), key=lambda t: activity.get(t, 0.0))
+    return evictable[:overflow]
+
+
+def _reader(first_id, subq, sink, stop, max_slots):
     """Own the live_pipeline HTTP/2 stream: read the session_id, subscribe ids pulled off subq (with
-    the session header), emit per-field velocity. All client use stays on this one thread."""
-    last, sid, subscribed = {}, None, {first_id}
+    the session header), emit per-field velocity, and run the velocity gate (evict cold tweets once the
+    live set passes max_slots). All client use stays on this one thread."""
+    last, sid, subscribed, activity = {}, None, {first_id}, {first_id: time.time()}
     with livepipe._client() as client:
         with client.stream("GET", livepipe.EVENTS, params={"topic": "/tweet_engagement/" + first_id}) as r:
             print(f"[reactive] live_pipeline connected {r.status_code} ({r.http_version})", file=sys.stderr)
@@ -37,25 +49,40 @@ def _reader(first_id, subq, sink, stop):
                 except queue.Empty:
                     pass
                 todo = [i for i in new if i not in subscribed]
-                if todo:
-                    subscribed.update(todo)
-                    try: livepipe.subscribe(client, sid, todo)
-                    except Exception as e: print(f"[reactive] subscribe: {e}", file=sys.stderr)
-                    print(f"[reactive] subscribed +{len(todo)} (total {len(subscribed)})", file=sys.stderr)
+                if not todo:
+                    return
+                evict = evict_targets(subscribed, activity, len(todo), max_slots, protect={first_id})
+                if evict:                                        # drop the coldest to make room for movers
+                    try: livepipe.subscribe(client, sid, [], unsub=evict)
+                    except Exception as e: print(f"[reactive] unsub: {e}", file=sys.stderr)
+                    for t in evict:
+                        subscribed.discard(t); activity.pop(t, None); last.pop(t, None)
+                    print(f"[reactive] evicted {len(evict)} cold", file=sys.stderr)
+                room = max_slots - len(subscribed)
+                if room <= 0:
+                    return                                       # set is full of warm tweets; new ones wait
+                todo = todo[:room]                               # take the top movers that fit the budget
+                now = time.time()
+                subscribed.update(todo)
+                for t in todo:
+                    activity[t] = now                            # fresh subs start warm (grace window)
+                try: livepipe.subscribe(client, sid, todo)
+                except Exception as e: print(f"[reactive] subscribe: {e}", file=sys.stderr)
+                print(f"[reactive] subscribed +{len(todo)} (slots {len(subscribed)}/{max_slots})", file=sys.stderr)
 
             for line in r.iter_lines():
                 if stop.is_set():
                     break
-                if not line:
+                drain_subscribe()                                # every line incl. the 25s heartbeats, so the
+                if not line:                                     # gate stays live even when no tweet is moving
                     continue
                 try: ev = json.loads(line)
                 except Exception: continue
                 top = ev.get("topic", "")
                 if top == "/system/config" and sid is None:
                     sid = ev.get("payload", {}).get("config", {}).get("session_id")
-                    drain_subscribe()                            # subscribe the initial batch + the queue
+                    drain_subscribe()                            # subscribe the initial batch the moment we have a session
                     continue
-                drain_subscribe()                                # pick up newly discovered ids
                 if not top.startswith("/tweet_engagement/"):
                     continue
                 tid = top.rsplit("/", 1)[-1]
@@ -63,6 +90,7 @@ def _reader(first_id, subq, sink, stop):
                 if not counts:
                     continue
                 now, hist, parts = time.time(), last.setdefault(tid, {}), []
+                activity[tid] = now                              # this tweet just moved; keep it warm
                 for f, v in counts.items():
                     if f in hist:
                         pv, pt = hist[f]; dt = now - pt
@@ -74,7 +102,7 @@ def _reader(first_id, subq, sink, stop):
                     print(f"  live {tid}  {'  '.join(parts)}", flush=True)
 
 
-async def run(fetch, interval, seconds, out_path):
+async def run(fetch, interval, seconds, out_path, max_slots):
     seen, subq = set(), queue.Queue()
     posts = await fetch()
     ids = [p["id"] for p in posts]
@@ -85,7 +113,7 @@ async def run(fetch, interval, seconds, out_path):
         subq.put(i)
     sink = open(out_path, "a")
     stop = threading.Event()
-    threading.Thread(target=_reader, args=(ids[0], subq, sink, stop), daemon=True).start()
+    threading.Thread(target=_reader, args=(ids[0], subq, sink, stop, max_slots), daemon=True).start()
     print(f"[reactive] discovered {len(ids)}", file=sys.stderr)
     start = time.time()
     try:
@@ -111,12 +139,13 @@ def main():
     ap.add_argument("--pages", type=int, default=2, help="discovery pages per poll")
     ap.add_argument("--tab", choices=["top", "live"], default="top", help="search discovery tab: top (movers) or live (newest)")
     ap.add_argument("--out", default="/tmp/reactive.jsonl", help="velocity JSONL sink")
+    ap.add_argument("--slots", type=int, default=40, help="max live subscriptions; evict the coldest beyond this")
     args = ap.parse_args()
     if args.search:
         fetch = lambda: xsearch.find_session(args.search, args.tab, args.pages, 1000, False)
     else:
         fetch = lambda: xsearch.find_list(args.list, args.pages, 1000, False)
-    asyncio.run(run(fetch, args.interval, args.seconds, args.out))
+    asyncio.run(run(fetch, args.interval, args.seconds, args.out, args.slots))
 
 
 if __name__ == "__main__":

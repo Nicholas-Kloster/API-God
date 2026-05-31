@@ -17,7 +17,7 @@ Keyless X toolkit, built, tested, and live. It reads X (and can write) without t
   - `--backend xai` : paid x_search, no account risk
 - **ingest.py** : continuous poll, dedup, JSONL sink. Source pluggable: `--list <id>` or `--search "solana"` (topic, low-noise ~2/min).
 - **livepipe.py** : real-time engagement push. SSE on api.x.com/live_pipeline; per-tweet velocity; no polling.
-- **reactive.py** : fuses discovery + livepipe. Discover a topic, subscribe its tweets, stream velocity, one process. The reader thread owns the live_pipeline session (discovery feeds ids via a queue) so requests.Session is never used cross-thread.
+- **reactive.py** : fuses discovery + livepipe. Discover a topic, subscribe its tweets, stream velocity, one process. The reader thread owns the live_pipeline session (discovery feeds ids via a queue) so requests.Session is never used cross-thread. A velocity gate (`--slots`, default 40) caps the live set and evicts the coldest (least-recently-active) tweets so the slots track movers; it drains on every heartbeat, so it stays live even when no tweet is moving.
 - **census.py** : browserless rate-limit map of X's GraphQL read surface. Pulls the queryId map from `main.js`, sweeps every read op with the 422 primitive, tabulates each bucket. One token per op, reads only (`--include-mutations` to opt in). `--deep` walks every lazy chunk (292 ops total via the `_.u` map); `--inventory` lists ops without probing.
 
 ### Session file
@@ -35,7 +35,7 @@ Keyless X toolkit, built, tested, and live. It reads X (and can write) without t
 - Full detail + queryIds in auto-memory `reference_x_searchtimeline_rate_limit`.
 
 ## What is next
-1. **reactive.py velocity gate**: evict cold tweets from the ~40 live slots, keep the movers. The one evidence-backed refinement (in testing most subscriptions watched were dead weight). Tune the threshold against a live hot topic.
+1. **reactive.py velocity gate**: DONE. `--slots` caps the live set, evicts the coldest by last-activity, drains on heartbeats; live-smoked at 5 slots on solana, cap held and eviction fired across polls. Remaining tuning: define "cold" by a velocity EWMA rather than last-activity, and pick the real slot count, against a genuinely hot tweet that pushes engagement.
 2. **TopicFollow** as a discovery source (X-curated topic feed; `Topic*` ops mapped).
 3. **Hook livepipe velocity into the engine score**.
 4. Later, optional: write verbs (`--post`/`--like`, burner-only), video (HLS), DM/Spaces mapping, persistent-browser ingest daemon.
