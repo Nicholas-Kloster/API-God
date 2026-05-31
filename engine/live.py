@@ -4,7 +4,7 @@ import asyncio, json, os, time, sys, threading
 from collections import deque, defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
 import websockets, requests
-from engine_core import norm_name, cashtag_hit, classify, zone_of, score_resolved, fetch_meta, independent_bonus, dedup_name, cluster_penalty, resolve_tweet
+from engine_core import norm_name, cashtag_hit, classify, zone_of, score_resolved, fetch_meta, independent_bonus, dedup_name, cluster_penalty, resolve_tweet, velocity_bonus
 from discovery import discover_independent
 from outcomes import record
 
@@ -18,6 +18,7 @@ gaps = Counter(); zone_count = Counter()
 by_status = defaultdict(set); by_creator = defaultdict(list); by_author = defaultdict(set)
 last_name = {}
 SAFE = [False]; rlog = deque(maxlen=12); ok_streak = [0]
+VELOCITY_RATES = {}      # mint -> engagement events/min; the injection point for a live_pipeline velocity stage (empty = inert)
 
 def note_resolve(is_ok):
     with lock:
@@ -149,6 +150,9 @@ def summarize():
         new_score, note, serial = cluster_penalty(s["score"], wc, ac)
         if note:
             s["score"] = new_score; s["serial"] = serial; s["notes"].append(note)
+        vb, vn = velocity_bonus(VELOCITY_RATES.get(s.get("mint")))   # live_pipeline engagement velocity (inert until a velocity stage fills VELOCITY_RATES)
+        if vb:
+            s["score"] += vb; s["notes"].append(vn)
     for s in survivors:                                  # outcome-ledger record: AFTER clustering (serial known), single-threaded (no race)
         try:
             record({"mint": s.get("mint"), "creator": s.get("creator"), "score": s.get("score"),

@@ -37,7 +37,7 @@ Keyless X toolkit, built, tested, and live. It reads X (and can write) without t
 ## What is next
 1. **reactive.py velocity gate**: DONE. `--slots` caps the live set, evicts the coldest by last-activity, drains on heartbeats; live-smoked at 5 slots on solana, cap held and eviction fired across polls. Remaining tuning: define "cold" by a velocity EWMA rather than last-activity, and pick the real slot count, against a genuinely hot tweet that pushes engagement.
 2. **TopicFollow** as a discovery source (X-curated topic feed; `Topic*` ops mapped).
-3. **Hook livepipe velocity into the engine score**.
+3. **Hook livepipe velocity into the engine score**: scoring term DONE (`velocity_bonus` + `engagement_velocity` in engine_core, wired into live's survivors pass via `VELOCITY_RATES`, inert until fed; tested including the livepipe->engine bridge). Remaining: the live stage that subscribes the top survivors' tweets via livepipe over a window, computes the rate, and fills `VELOCITY_RATES` before the cluster/velocity pass.
 4. Later, optional: write verbs (`--post`/`--like`, burner-only), video (HLS), DM/Spaces mapping, persistent-browser ingest daemon.
 
 ## Notes

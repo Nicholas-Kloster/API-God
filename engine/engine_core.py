@@ -88,6 +88,28 @@ def independent_bonus(n_ca, n_ticker=0):
         parts.append(tag)
     return s, "; ".join(parts)
 
+VELOCITY_WARM = 10.0     # engagement events/min on the coin's tweet: gaining attention
+VELOCITY_HOT = 50.0      # engagement events/min: viral
+
+def engagement_velocity(field_rates):
+    """Collapse live_pipeline's per-field velocity (the {field: events-per-minute} dict that livepipe and
+    reactive emit) into one engagement rate. Views are excluded: they inflate fast and are not a
+    commitment signal."""
+    if not field_rates:
+        return 0.0
+    return sum(v for k, v in field_rates.items() if k != "view_count" and v and v > 0)
+
+def velocity_bonus(rate_per_min):
+    """Organic-demand signal from live_pipeline: a coin's tweet gaining engagement fast is real attention
+    the static counts miss. Soft and capped (engagement is bottable, and cluster_penalty already handles
+    serial authors); absence is not penalized (a real coin may be too new to have moved). Mirrors
+    independent_bonus. Returns (points, note)."""
+    if not rate_per_min or rate_per_min < VELOCITY_WARM:
+        return 0, ""
+    if rate_per_min >= VELOCITY_HOT:
+        return 2, f"velocity {rate_per_min:.0f}/min (hot)"
+    return 1, f"velocity {rate_per_min:.0f}/min"
+
 def cluster_penalty(score, wallet_count, author_count):
     """Single source for the serial-wallet/author penalty, shared by live and replay so a replay's
     cluster scoring AND notes match a live run exactly (finding #6). Returns (new_score, note, serial).

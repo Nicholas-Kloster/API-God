@@ -2,7 +2,8 @@
 any fix or refactor. Ports the stress.py adversarial cases; the two known-open BUILD gaps
 are documented xfail so they are tracked, not silently failing."""
 from engine_core import (norm_name, cashtag_hit, classify, zone_of,
-                         score_resolved, independent_bonus, dedup_name, cluster_penalty)
+                         score_resolved, independent_bonus, dedup_name, cluster_penalty,
+                         velocity_bonus, engagement_velocity)
 import pytest
 
 
@@ -75,3 +76,22 @@ def test_cluster_penalty_canonical():
 def test_perfect_fake_neutralized():
     s, _ = score_resolved("red", refs=True, blue=True, mism=False)
     assert s < 4
+
+
+def test_velocity_bonus_tiers():
+    assert velocity_bonus(0) == (0, "")
+    assert velocity_bonus(5) == (0, "")                    # below the warm threshold
+    assert velocity_bonus(20)[0] == 1                      # warm
+    hot_pts, hot_note = velocity_bonus(80)
+    assert hot_pts == 2 and "hot" in hot_note              # viral
+
+
+def test_velocity_bonus_absence_is_neutral():
+    assert velocity_bonus(None) == (0, "")                 # no live reading -> no bonus, no penalty
+
+
+def test_engagement_velocity_sums_and_excludes_views():
+    rates = {"favorite_count": 30.0, "retweet_count": 12.0, "reply_count": 3.0, "view_count": 9000.0}
+    assert engagement_velocity(rates) == 45.0              # commitment signals summed, views excluded
+    assert engagement_velocity({}) == 0.0
+    assert velocity_bonus(engagement_velocity(rates))[0] == 1   # the live_pipeline -> engine bridge: 45/min -> warm
