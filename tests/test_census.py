@@ -51,3 +51,12 @@ def test_probe_403_no_headers_flagged():
     s = FakeSession([("graphql", FakeResp(403, headers={}))])
     r = census.probe(s, "Q1", "UsersByRestIds")
     assert r["status"] == 403 and "limit" not in r and "WAF" in r["note"]
+
+
+def test_chunk_urls_parses_webpack_u_builder():
+    html = ('x _.u=e=>""+(({10:"bundle.Bookmarks",20:"i18n/th"}[e]||e)+"."+'
+            '{10:"abc123",20:"def456",30:"99hash"}[e]+"a.js"),y')
+    urls = census._chunk_urls(html)
+    assert "https://abs.twimg.com/responsive-web/client-web/bundle.Bookmarks.abc123a.js" in urls
+    assert any("30.99hasha.js" in u for u in urls)      # a chunk with no name uses its id
+    assert not any("i18n/th" in u for u in urls)        # i18n chunk skipped

@@ -104,6 +104,12 @@ python census.py --json map.json  # save the full per-op map
 
 The read is cheap but not free: each probe spends one token of the bucket it measures. Mutations are skipped unless you pass `--include-mutations`. A 2026-05-30 sweep of 93 reads: 500 is the default (67 ops), 17 scraping-attractive ops are throttled to 50 (search, the timelines, followers, the community feeds), and a few are special (typeahead 5000, tweet-detail 150). The snapshot is in `x-read-bucket-map.json`.
 
+`--deep` walks every lazy-loaded chunk too, not just `main.js`, by parsing webpack's `_.u` chunk map from the inline runtime (chunk URL = `name` + `.` + `hash` + `a.js`). That lifts the surface from the 157 ops in the main bundle to **292** (161 query, 131 mutation), the Bookmarks, Birdwatch, AudioSpace, Subscriptions, and Communities operations that only load with their feature. `--inventory` lists every op without probing; the full inventory is in `x-op-inventory.json`.
+
+```bash
+python census.py --deep --inventory --json x-op-inventory.json
+```
+
 ### fielddiff.py: which op leaks the most
 
 X serves the same object through several resolvers, and they do not return the same fields. `fielddiff.py` resolves one tweet through the keyless CDN and the authed `TweetResultsByRestIds`, then diffs the field-name vocabulary of each:

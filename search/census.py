@@ -39,6 +39,9 @@ HOME = "https://x.com/"
 GQL = "https://x.com/i/api/graphql/{qid}/{op}"
 OP_RE = re.compile(r'queryId:"([^"]+)",operationName:"([^"]+)",operationType:"([^"]+)"')
 BUNDLE_RE = re.compile(r'https://abs\.twimg\.com/responsive-web/client-web/[A-Za-z0-9._/-]+\.js')
+BUNDLE_BASE = "https://abs.twimg.com/responsive-web/client-web/"
+CHUNK_SUFFIX = "a.js"            # X's webpack _.u builder appends "a.js", not ".js"
+SKIP_CHUNK = ("i18n/", "emoji", "refractor", "syntax-highlighter", "countries", "languages")
 
 
 def _load_cookies():
@@ -71,13 +74,40 @@ def _authed_session(cookies):
     return s
 
 
-def extract_ops(s):
-    """Pull the live operationName -> {queryId, type} map from X's JS bundles. Reads the bundle URLs
-    out of the home HTML, then regexes each. Lazy-loaded chunks are not referenced in the home HTML,
-    so this is the core surface (the main bundle), not every op X ships."""
+def _chunk_urls(html):
+    """Parse webpack's _.u chunk-URL builder from the inline runtime: two flat maps (chunkId -> name,
+    chunkId -> contenthash). The URL is publicPath + name + '.' + hash + 'a.js' (X appends 'a.js', not
+    '.js', which is why a naive '.js' guess 404s). Returns the code-chunk URLs, skipping the
+    i18n/emoji/syntax bundles that carry no GraphQL ops."""
+    i = html.find(".u=")
+    if i < 0:
+        return []
+    try:
+        b1 = html.index("{", i); e1 = html.index("}", b1)
+        b2 = html.index("{", e1 + 1); e2 = html.index("}", b2)
+    except ValueError:
+        return []
+    names = {int(k): v for k, v in re.findall(r'(\d+):"([^"]*)"', html[b1:e1 + 1])}
+    hashes = {int(k): v for k, v in re.findall(r'(\d+):"([^"]*)"', html[b2:e2 + 1])}
+    out = []
+    for cid, h in hashes.items():
+        name = names.get(cid, str(cid))
+        if any(x in name for x in SKIP_CHUNK):
+            continue
+        out.append(f"{BUNDLE_BASE}{name}.{h}{CHUNK_SUFFIX}")
+    return out
+
+
+def extract_ops(s, deep=False):
+    """Pull the live operationName -> {queryId, type} map from X's JS bundles. Always reads the bundle
+    URLs in the home HTML (the main bundle, the core surface). With deep=True, also walks every
+    lazy-loaded code chunk named in webpack's runtime, for the complete op set X ships."""
     html = s.get(HOME, timeout=20).text
+    urls = sorted(set(BUNDLE_RE.findall(html)))
+    if deep:
+        urls += _chunk_urls(html)
     ops = {}
-    for url in sorted(set(BUNDLE_RE.findall(html))):
+    for url in urls:
         try:
             js = s.get(url, timeout=30).text
         except Exception:
@@ -114,14 +144,29 @@ def main():
     ap.add_argument("--include-mutations", action="store_true",
                     help="also probe write ops (still 422, never executes)")
     ap.add_argument("--json", metavar="PATH", help="write the full per-op map as JSON")
+    ap.add_argument("--deep", action="store_true",
+                    help="walk every lazy-loaded code chunk too, not just the main bundle (the complete op set)")
+    ap.add_argument("--inventory", action="store_true",
+                    help="just list the extracted ops (op, type, queryId) and counts; no live probing")
     ap.add_argument("--limit-ops", type=int, default=0, help="probe only the first N ops (smoke test)")
     args = ap.parse_args()
     if not STATE.exists():
         sys.exit("[census] no saved session at ~/.x-session/state.json (run xsearch.py --login)")
     cookies = _load_cookies()
-    ops = extract_ops(_clean_session(cookies))
+    ops = extract_ops(_clean_session(cookies), deep=args.deep)
     if not ops:
         sys.exit("[census] no ops extracted (bundle fetch failed?)")
+    if args.inventory:
+        print(f"[census] {len(ops)} ops extracted ({dict(Counter(m['type'] for m in ops.values()))})"
+              + (" [deep]" if args.deep else ""), file=sys.stderr)
+        print(f"\n{'operation':46} {'type':9} queryId")
+        for op in sorted(ops):
+            m = ops[op]
+            print(f"{op:46} {m['type']:9} {m['queryId']}")
+        if args.json:
+            Path(args.json).write_text(json.dumps(ops, indent=2))
+            print(f"[census] wrote {args.json}", file=sys.stderr)
+        return
     s = _authed_session(cookies)
     targets = [(op, m["queryId"], m["type"]) for op, m in sorted(ops.items())
                if args.include_mutations or m["type"] == "query"]
