@@ -357,12 +357,22 @@ async def probe_session(url, marker, max_req, delay, reload=False):
     from playwright.async_api import async_playwright
     import time as _time
     log = []
+    ratelimit = {}
     start = _time.monotonic()
     hit = asyncio.Event()
 
     async def on_response(resp):
         if marker in resp.url:
             log.append((resp.status, _time.monotonic() - start))
+            try:                                                # X reports the exact quota in headers
+                h = resp.headers
+                if h.get("x-rate-limit-limit"):
+                    ratelimit.clear()
+                    ratelimit.update(limit=h.get("x-rate-limit-limit"),
+                                     remaining=h.get("x-rate-limit-remaining"),
+                                     reset=h.get("x-rate-limit-reset"))
+            except Exception:
+                pass
             if resp.status != 200:                              # the wall: stop, do not keep hammering
                 hit.set()
 
@@ -388,7 +398,7 @@ async def probe_session(url, marker, max_req, delay, reload=False):
                 await p.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await p.wait_for_timeout(delay)
         await b.close()
-    return log
+    return log, ratelimit
 
 
 # ---------- keyless hydration (no account, no per-token wall, ~146/min on one IP) ----------
@@ -681,8 +691,11 @@ def main():
         else:
             url = f"https://x.com/search?q={quote(args.query)}&src=typed_query&f={args.tab}"
             marker = "SearchTimeline"
-        log = asyncio.run(probe_session(url, marker, args.max_req, args.delay, args.reload))
-        print(json.dumps({"endpoint": marker, **_probe_report(log)}, indent=2))
+        log, rl = asyncio.run(probe_session(url, marker, args.max_req, args.delay, args.reload))
+        report = {"endpoint": marker, **_probe_report(log)}
+        if rl:                                                  # X's own quota, read not exhausted
+            report["rate_limit_headers"] = rl
+        print(json.dumps(report, indent=2))
         print("status counts:", dict(Counter(s for s, _ in log)), file=sys.stderr)
         return
     if args.track:
