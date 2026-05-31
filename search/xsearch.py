@@ -437,18 +437,13 @@ def find_hydrate(ids, delay_ms=450):
     return out
 
 
-async def find_batch(ids):
-    """Authed batch resolve via TweetResultsByRestIds: up to ~100 ids in ONE call, WITH retweet_count
-    (which the keyless CDN drops). Rides the session: captures the client's features from a live
-    request, then calls the batch endpoint from the page (bearer + ct0, no x-client-transaction-id)."""
-    if not STATE.exists():
-        print("[batch] no saved session (run: python xsearch.py --login) - skipping", file=sys.stderr)
-        return []
+async def capture_features():
+    """One-time headless browser launch to capture the client's current features/fieldToggles/bearer
+    from a live graphql request. X validates the features blob, so any authed GraphQL read that wants
+    real data (not just a 422) needs the live values. Returns {} on failure. Shared by find_batch and
+    the fielddiff tool."""
     from playwright.async_api import async_playwright
     import urllib.parse as _up
-    ids = [str(i).strip() for i in ids if str(i).strip().isdigit()]
-    if not ids:
-        return []
     cap = {}
 
     def on_request(req):
@@ -469,7 +464,21 @@ async def find_batch(ids):
                 break
             await p.wait_for_timeout(500)
         await b.close()
-    if not (cap.get("features") and cap.get("bearer")):
+    return cap if (cap.get("features") and cap.get("bearer")) else {}
+
+
+async def find_batch(ids):
+    """Authed batch resolve via TweetResultsByRestIds: up to ~100 ids in ONE call, WITH retweet_count
+    (which the keyless CDN drops). Rides the session: captures the client's features from a live
+    request, then calls the batch endpoint from the page (bearer + ct0, no x-client-transaction-id)."""
+    if not STATE.exists():
+        print("[batch] no saved session (run: python xsearch.py --login) - skipping", file=sys.stderr)
+        return []
+    ids = [str(i).strip() for i in ids if str(i).strip().isdigit()]
+    if not ids:
+        return []
+    cap = await capture_features()
+    if not cap:
         print("[batch] could not capture client features/bearer", file=sys.stderr)
         return []
 
