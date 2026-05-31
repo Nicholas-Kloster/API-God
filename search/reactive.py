@@ -113,10 +113,11 @@ def main():
     ap.add_argument("--interval", type=int, default=30, help="seconds between discovery polls")
     ap.add_argument("--seconds", type=int, default=180, help="total run time")
     ap.add_argument("--pages", type=int, default=2, help="discovery pages per poll")
+    ap.add_argument("--tab", choices=["top", "live"], default="top", help="search discovery tab: top (movers) or live (newest)")
     ap.add_argument("--out", default="/tmp/reactive.jsonl", help="velocity JSONL sink")
     args = ap.parse_args()
     if args.search:
-        fetch = lambda: xsearch.find_session(args.search, "live", args.pages, 1000, False)
+        fetch = lambda: xsearch.find_session(args.search, args.tab, args.pages, 1000, False)
     else:
         fetch = lambda: xsearch.find_list(args.list, args.pages, 1000, False)
     asyncio.run(run(fetch, args.interval, args.seconds, args.out))
